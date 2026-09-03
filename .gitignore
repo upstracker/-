@@ -1,0 +1,29 @@
+# macOS and editor state
+.DS_Store
+.vscode/
+
+# Python environments and caches
+.venv/
+.venv*/
+.build_venv_*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Build products
+build/
+build_*/
+dist/
+dist_*/
+dist_installer/
+
+# User databases, backups, logs, and generated documents
+data/
+database_backups/
+output_pdfs/
+exported_reports/
+*.db
+*.db-shm
+*.db-wal
+*.log

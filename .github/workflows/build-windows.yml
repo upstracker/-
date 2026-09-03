@@ -1,0 +1,123 @@
+name: Build Universal Windows Installer
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-payload:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x86, x64]
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.8.10 (${{ matrix.architecture }})
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
+          architecture: ${{ matrix.architecture }}
+          cache: pip
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade "pip==25.0.1"
+          python -m pip install -r requirements-build.txt
+
+      - name: Build Application with PyInstaller
+        run: |
+          pyinstaller app.spec --clean -y --distpath dist_${{ matrix.architecture }} --workpath build_${{ matrix.architecture }}
+
+      - name: Run packaged self-test
+        shell: pwsh
+        run: |
+          & ".\dist_${{ matrix.architecture }}\BatteryRequisition\BatteryRequisition.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Packaged self-test failed" }
+
+      - name: Upload ${{ matrix.architecture }} payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-${{ matrix.architecture }}
+          path: dist_${{ matrix.architecture }}/BatteryRequisition
+          if-no-files-found: error
+
+  package-installer:
+    needs: build-payload
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Download x86 payload
+        uses: actions/download-artifact@v4
+        with:
+          name: payload-x86
+          path: dist_x86/BatteryRequisition
+
+      - name: Download x64 payload
+        uses: actions/download-artifact@v4
+        with:
+          name: payload-x64
+          path: dist_x64/BatteryRequisition
+
+      - name: Install pinned Inno Setup Compiler
+        run: |
+          choco install innosetup --version=6.7.1 --no-progress -y
+
+      - name: Compile universal installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+
+      - name: Smoke-test install and uninstall on Windows runner
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "BatteryRequisitionInstalled"
+          $setup = Resolve-Path ".\dist_installer\BatteryRequisition_Setup_v1.0.0.exe"
+          $install = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer returned $($install.ExitCode)" }
+          & "$installDir\BatteryRequisition.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Installed application self-test failed" }
+          & "$installDir\BatteryRequisition.exe" --initialize-only
+          if ($LASTEXITCODE -ne 0) { throw "Installed data initialization failed" }
+          $dataDir = Join-Path $env:LOCALAPPDATA "BatteryRequisition"
+          $dbPath = Join-Path $dataDir "inventory.db"
+          if (-not (Test-Path $dbPath)) { throw "Per-user database was not created" }
+          $dbHashBeforeUpdate = (Get-FileHash $dbPath -Algorithm SHA256).Hash
+          $update = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir" -Wait -PassThru
+          if ($update.ExitCode -ne 0) { throw "Update install returned $($update.ExitCode)" }
+          $dbHashAfterUpdate = (Get-FileHash $dbPath -Algorithm SHA256).Hash
+          if ($dbHashAfterUpdate -ne $dbHashBeforeUpdate) { throw "Update changed user database" }
+          $sentinel = Join-Path $dataDir "uninstall-must-preserve.txt"
+          Set-Content -Path $sentinel -Value "preserve"
+          $uninstall = Get-ChildItem -Path $installDir -Filter "unins*.exe" | Select-Object -First 1
+          $remove = Start-Process -FilePath $uninstall.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstaller returned $($remove.ExitCode)" }
+          if (-not (Test-Path $sentinel)) { throw "Uninstaller removed user data" }
+          if (-not (Test-Path $dbPath)) { throw "Uninstaller removed user database" }
+
+      - name: Package portable payloads
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist_x86\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_x86_v1.0.0.zip
+          Compress-Archive -Path dist_x64\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_x64_v1.0.0.zip
+
+      - name: Upload Installer (.exe) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Setup_BatteryRequisition_v1.0.0_Installer
+          path: dist_installer/BatteryRequisition_Setup_v1.0.0.exe
+          if-no-files-found: error
+
+      - name: Upload Portable (.zip) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BatteryRequisition_Portable_v1.0.0_Zip
+          path: dist_installer/BatteryRequisition_Portable_*_v1.0.0.zip
+          if-no-files-found: error
